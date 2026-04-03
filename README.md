@@ -2,6 +2,8 @@
 
 Bash script to detect CVE-2025-55182 (React2Shell) and credential exposure in Next.js projects. Zero dependencies.
 
+**[日本語版 README はこちら](README_ja.md)**
+
 ## CVE-2025-55182: React2Shell
 
 CVSS: **10.0 (CRITICAL)** | CWE-502: Deserialization of Untrusted Data | SNORT SID: 65554
@@ -146,27 +148,13 @@ See `claude-code/SKILL.md` for the skill wrapper.
 
 ---
 
-## 日本語セクション
+## Disclaimer
 
-### 概要
+This tool is provided for **defensive security purposes only**. It performs local-only, read-only checks against your own project files. No network connections are made, no data is sent externally, and no exploits are executed.
 
-CVE-2025-55182（React2Shell）はNext.jsのServer Componentsを介した認証不要のRCE脆弱性です。CVSS 10.0（最高深刻度）。
+The vulnerability information and IOC data are based on publicly available sources (NVD, Cisco Talos). This scanner may produce false positives or miss certain attack vectors. It does not replace professional security audits, penetration testing, or vendor-provided security patches.
 
-このスクリプトはNext.jsプロジェクトをスキャンし、脆弱なバージョン・認証情報の漏洩・IOCを検出します。依存ゼロ、Bashのみ。
-
-### 使い方
-
-```bash
-bash scan.sh [対象ディレクトリ]
-```
-
-### 終了コード
-
-- `0` — 問題なし
-- `1` — 警告あり（要確認）
-- `2` — 深刻な問題あり（即時対応が必要）
-
----
+**Use at your own risk.** The authors assume no liability for damages resulting from the use of this tool.
 
 ## License
 
