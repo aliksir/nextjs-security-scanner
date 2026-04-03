@@ -40,21 +40,18 @@ strip_version_prefix() {
   echo "$1" | sed 's/[\^~>=<]//g' | tr -d ' '
 }
 
-# Compare version strings: returns 0 if $1 == $2
-version_eq() { [[ "$1" == "$2" ]]; }
-
 # Returns 0 (true) if version $1 is in the given next.js vulnerable range
 is_nextjs_vulnerable() {
   local ver="$1"
   local major minor patch
 
   # Parse x.y.z
-  IFS='.' read -r major minor patch <<< "$(echo "$ver" | sed 's/-[^.]*$//')"
+  IFS='.' read -r major minor patch <<< "$(echo "$ver" | sed 's/-[^.]*$//')" || true
 
   # Must be numeric
-  [[ "$major" =~ ^[0-9]+$ ]] || return 1
-  [[ "$minor" =~ ^[0-9]+$ ]] || return 1
-  [[ "$patch" =~ ^[0-9]+$ ]] || return 1
+  [[ "${major:-}" =~ ^[0-9]+$ ]] || return 1
+  [[ "${minor:-}" =~ ^[0-9]+$ ]] || return 1
+  [[ "${patch:-}" =~ ^[0-9]+$ ]] || return 1
 
   # Next.js vulnerable ranges (CVE-2025-55182, NVD confirmed)
   # 15.0.0 - 15.0.4
@@ -86,6 +83,12 @@ is_react_vulnerable() {
   done
   return 1
 }
+
+# Common find exclusions
+FIND_EXCLUDES=(-not -path "*/node_modules/*" -not -path "*/_deleted/*" -not -path "*/.git/*")
+
+# Next.js config file candidates
+NEXT_CONFIGS=("$TARGET_DIR"/next.config.js "$TARGET_DIR"/next.config.mjs "$TARGET_DIR"/next.config.ts)
 
 # ============================================================
 # Header
@@ -124,7 +127,7 @@ NEXTJS_VERSION=""
 
 # Check package.json
 if [[ -f "$TARGET_DIR/package.json" ]]; then
-  raw_ver=$(grep -E '"next"\s*:\s*"[^"]*"' "$TARGET_DIR/package.json" 2>/dev/null | head -1 | sed 's/.*"next"[[:space:]]*:[[:space:]]*"//;s/".*//')
+  raw_ver=$(grep -E '"next"\s*:\s*"[^"]*"' "$TARGET_DIR/package.json" 2>/dev/null | head -1 | sed 's/.*"next"[[:space:]]*:[[:space:]]*"//;s/".*//' || true)
   if [[ -n "$raw_ver" ]]; then
     NEXTJS_VERSION=$(strip_version_prefix "$raw_ver")
     if is_nextjs_vulnerable "$NEXTJS_VERSION"; then
@@ -178,7 +181,7 @@ PHASE2_ISSUES=0
 REACT_VERSION=""
 
 if [[ -f "$TARGET_DIR/package.json" ]]; then
-  raw_react=$(grep -E '"react"\s*:\s*"[^"]*"' "$TARGET_DIR/package.json" 2>/dev/null | head -1 | sed 's/.*"react"[[:space:]]*:[[:space:]]*"//;s/".*//')
+  raw_react=$(grep -E '"react"\s*:\s*"[^"]*"' "$TARGET_DIR/package.json" 2>/dev/null | head -1 | sed 's/.*"react"[[:space:]]*:[[:space:]]*"//;s/".*//' || true)
   if [[ -n "$raw_react" ]]; then
     REACT_VERSION=$(strip_version_prefix "$raw_react")
     if is_react_vulnerable "$REACT_VERSION"; then
@@ -217,8 +220,10 @@ echo -e "${CYAN}[Phase 3] App Router / Server Components detection${NC}"
 if [[ -d "$TARGET_DIR/app" ]]; then
   log_info "App Router detected (app/ directory exists)"
   # Check for Server Component directives
-  server_count=$(grep -rEl '"use server"' "$TARGET_DIR/app" 2>/dev/null | grep -v node_modules | wc -l || echo "0")
-  client_count=$(grep -rEl '"use client"' "$TARGET_DIR/app" 2>/dev/null | grep -v node_modules | wc -l || echo "0")
+  server_count=$( (grep -rEl --exclude-dir=node_modules '"use server"' "$TARGET_DIR/app" 2>/dev/null || true) | wc -l | tr -d '[:space:]')
+  server_count=${server_count:-0}
+  client_count=$( (grep -rEl --exclude-dir=node_modules '"use client"' "$TARGET_DIR/app" 2>/dev/null || true) | wc -l | tr -d '[:space:]')
+  client_count=${client_count:-0}
   if [[ "$server_count" -gt 0 ]]; then
     log_info "Server Components in use ($server_count files with \"use server\")"
     if [[ $PHASE1_ISSUES -gt 0 ]]; then
@@ -233,7 +238,7 @@ else
 fi
 
 # Check next.config.*
-for cfg in "$TARGET_DIR"/next.config.js "$TARGET_DIR"/next.config.mjs "$TARGET_DIR"/next.config.ts; do
+for cfg in "${NEXT_CONFIGS[@]}"; do
   if [[ -f "$cfg" ]]; then
     log_info "Next.js config found: $(basename "$cfg")"
     if grep -q 'experimental' "$cfg" 2>/dev/null; then
@@ -286,19 +291,16 @@ while IFS= read -r envfile; do
     continue
   fi
   for pattern in "${SECRET_PATTERNS[@]}"; do
-    if grep -q "$pattern" "$envfile" 2>/dev/null; then
-      # Check if it has an actual value (not empty)
-      line=$(grep "$pattern" "$envfile" 2>/dev/null | head -1)
-      if echo "$line" | grep -qE '=.+'; then
-        log_warning "$envfile: $pattern has a value set"
-        PHASE4_ISSUES=$((PHASE4_ISSUES + 1))
-      fi
+    line=$(grep -m1 "$pattern" "$envfile" 2>/dev/null || true)
+    if [[ -n "$line" ]] && echo "$line" | grep -qE '=.+'; then
+      log_warning "$envfile: $pattern has a value set"
+      PHASE4_ISSUES=$((PHASE4_ISSUES + 1))
     fi
   done
-done < <(find "$TARGET_DIR" -maxdepth 3 -name ".env*" -type f -not -path "*/node_modules/*" -not -path "*/_deleted/*" 2>/dev/null)
+done < <(find "$TARGET_DIR" -maxdepth 3 -name ".env*" -type f "${FIND_EXCLUDES[@]}" 2>/dev/null)
 
 # Check next.config.* for secrets in env / publicRuntimeConfig
-for cfg in "$TARGET_DIR"/next.config.js "$TARGET_DIR"/next.config.mjs "$TARGET_DIR"/next.config.ts; do
+for cfg in "${NEXT_CONFIGS[@]}"; do
   if [[ -f "$cfg" ]]; then
     for pattern in "${SECRET_PATTERNS[@]}"; do
       if grep -q "$pattern" "$cfg" 2>/dev/null; then
@@ -313,20 +315,23 @@ for cfg in "$TARGET_DIR"/next.config.js "$TARGET_DIR"/next.config.mjs "$TARGET_D
   fi
 done
 
-# Check source code for hardcoded secret prefixes
-# Limit to relevant extensions, skip node_modules
-for prefix_pattern in "${HARDCODED_PREFIXES[@]}"; do
-  while IFS= read -r match_file; do
+# Check source code for hardcoded secret prefixes (single-pass scan)
+combined_prefix=$(IFS='|'; echo "${HARDCODED_PREFIXES[*]}")
+while IFS= read -r match_file; do
+  for prefix_pattern in "${HARDCODED_PREFIXES[@]}"; do
     match_line=$(grep -m1 -E "$prefix_pattern" "$match_file" 2>/dev/null | head -c 120 || true)
     if [[ -n "$match_line" ]]; then
       log_critical "Possible hardcoded secret in $match_file"
       echo -e "  ${RED}  -> Pattern '$prefix_pattern' match: ${match_line:0:80}${NC}"
       PHASE4_ISSUES=$((PHASE4_ISSUES + 1))
+      break
     fi
-  done < <(grep -rlE "$prefix_pattern" "$TARGET_DIR" \
-    --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" --include="*.mjs" \
-    2>/dev/null | grep -v node_modules | grep -v _deleted | grep -v .git || true)
-done
+  done
+done < <(grep -rlE "$combined_prefix" "$TARGET_DIR" \
+  --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" --include="*.mjs" \
+  --exclude-dir=node_modules --exclude-dir=_deleted --exclude-dir=.git \
+  --exclude="scan.sh" \
+  2>/dev/null || true)
 
 # Reminder about __NEXT_DATA__
 if [[ "$IS_NEXTJS" == "true" ]]; then
@@ -354,9 +359,7 @@ while IFS= read -r keyfile; do
     PHASE5_ISSUES=$((PHASE5_ISSUES + 1))
   fi
 done < <(find "$TARGET_DIR" \
-  -not -path "*/node_modules/*" \
-  -not -path "*/_deleted/*" \
-  -not -path "*/.git/*" \
+  "${FIND_EXCLUDES[@]}" \
   \( -name "id_rsa" -o -name "id_ed25519" -o -name "id_ecdsa" -o -name "id_dsa" \
      -o -name "*.pem" -o -name "*.p12" -o -name "*.pfx" \) \
   -type f 2>/dev/null)
@@ -372,9 +375,7 @@ while IFS= read -r sshfile; do
   log_warning "SSH meta file found in project: $sshfile"
   PHASE5_ISSUES=$((PHASE5_ISSUES + 1))
 done < <(find "$TARGET_DIR" \
-  -not -path "*/node_modules/*" \
-  -not -path "*/_deleted/*" \
-  -not -path "*/.git/*" \
+  "${FIND_EXCLUDES[@]}" \
   \( -name "known_hosts" -o -name "authorized_keys" \) \
   -type f 2>/dev/null)
 
@@ -413,11 +414,15 @@ while IFS= read -r yamlfile; do
     log_warning "$yamlfile: service account token mount detected — verify token scope"
     PHASE6_ISSUES=$((PHASE6_ISSUES + 1))
   fi
-done < <(find "$TARGET_DIR" \
-  -not -path "*/node_modules/*" \
-  -not -path "*/_deleted/*" \
+done < <(yaml_files=$(find "$TARGET_DIR" \
+  "${FIND_EXCLUDES[@]}" \
   \( -name "*.yaml" -o -name "*.yml" \) \
-  -type f 2>/dev/null | head -50)
+  -type f 2>/dev/null)
+  yaml_count=$(echo "$yaml_files" | grep -c . || true)
+  if [[ "$yaml_count" -gt 50 ]]; then
+    echo -e "  ${YELLOW}[WARN] $yaml_count YAML files found, scanning first 50 only${NC}" >&2
+  fi
+  echo "$yaml_files" | head -50)
 
 # AWS: IMDSv2 check hint
 if [[ -f "$TARGET_DIR/package.json" ]] && grep -qiE '"aws-sdk|@aws-sdk' "$TARGET_DIR/package.json" 2>/dev/null; then
@@ -445,17 +450,22 @@ declare -a C2_IPS=(
 )
 
 # Check source files for C2 IP references
-for ip in "${C2_IPS[@]}"; do
-  while IFS= read -r match_file; do
-    log_critical "C2 IP address '$ip' found in source: $match_file"
-    match_line=$(grep -m1 "$ip" "$match_file" 2>/dev/null | head -c 120 || true)
-    echo -e "  ${RED}  -> $match_line${NC}"
-    PHASE7_ISSUES=$((PHASE7_ISSUES + 1))
-  done < <(grep -rl "$ip" "$TARGET_DIR" \
-    --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" \
-    --include="*.mjs" --include="*.json" --include="*.env" \
-    2>/dev/null | grep -v node_modules | grep -v .git || true)
-done
+c2_pattern=$(printf '%s\n' "${C2_IPS[@]}" | sed 's/\./\\./g' | paste -sd'|' -)
+while IFS= read -r match_file; do
+  for ip in "${C2_IPS[@]}"; do
+    if grep -q "$ip" "$match_file" 2>/dev/null; then
+      log_critical "C2 IP address '$ip' found in source: $match_file"
+      match_line=$(grep -m1 "$ip" "$match_file" 2>/dev/null | head -c 120 || true)
+      echo -e "  ${RED}  -> $match_line${NC}"
+      PHASE7_ISSUES=$((PHASE7_ISSUES + 1))
+    fi
+  done
+done < <(grep -rlE "$c2_pattern" "$TARGET_DIR" \
+  --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" \
+  --include="*.mjs" --include="*.json" --include="*.env" \
+  --exclude-dir=node_modules --exclude-dir=.git \
+  --exclude="scan.sh" \
+  2>/dev/null || true)
 
 # /tmp/ random dot-prefix processes (Linux only)
 if [[ "$(uname -s)" == "Linux" ]]; then
