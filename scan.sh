@@ -87,6 +87,10 @@ is_react_vulnerable() {
 # Common find exclusions
 FIND_EXCLUDES=(-not -path "*/node_modules/*" -not -path "*/_deleted/*" -not -path "*/.git/*")
 
+# Common grep --include flags for source files
+SOURCE_INCLUDES=(--include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" --include="*.mjs")
+GREP_EXCLUDES=(--exclude-dir=node_modules --exclude-dir=_deleted --exclude-dir=.git --exclude="scan.sh")
+
 # Next.js config file candidates
 NEXT_CONFIGS=("$TARGET_DIR"/next.config.js "$TARGET_DIR"/next.config.mjs "$TARGET_DIR"/next.config.ts)
 
@@ -206,6 +210,19 @@ if [[ -f "$TARGET_DIR/package-lock.json" ]]; then
   fi
 fi
 
+# Check yarn.lock for React
+if [[ -f "$TARGET_DIR/yarn.lock" ]]; then
+  yarn_react=$(grep -A2 '^react@' "$TARGET_DIR/yarn.lock" 2>/dev/null | grep '  version' | head -1 | sed 's/.*version "//;s/".*//' || true)
+  if [[ -n "$yarn_react" ]] && [[ "$yarn_react" != "$REACT_VERSION" ]]; then
+    if is_react_vulnerable "$yarn_react"; then
+      log_critical "React v$yarn_react (resolved in yarn.lock) is in CVE-2025-55182 vulnerable list"
+      PHASE2_ISSUES=$((PHASE2_ISSUES + 1))
+    else
+      log_info "Resolved React in yarn.lock: v$yarn_react (safe)"
+    fi
+  fi
+fi
+
 if [[ $PHASE2_ISSUES -eq 0 ]] && [[ -z "$REACT_VERSION" ]]; then
   log_pass "No React dependency found"
 fi
@@ -283,6 +300,9 @@ declare -a HARDCODED_PREFIXES=(
   "npm_[A-Za-z0-9]"
 )
 
+# Build combined pattern for SECRET_PATTERNS (single grep per file instead of N)
+SECRET_COMBINED=$(IFS='|'; echo "${SECRET_PATTERNS[*]}")
+
 # Check .env* files (exclude .env.example and .env.sample)
 while IFS= read -r envfile; do
   basename_env=$(basename "$envfile")
@@ -290,24 +310,29 @@ while IFS= read -r envfile; do
   if [[ "$basename_env" == ".env.example" ]] || [[ "$basename_env" == ".env.sample" ]]; then
     continue
   fi
-  for pattern in "${SECRET_PATTERNS[@]}"; do
-    line=$(grep -m1 "$pattern" "$envfile" 2>/dev/null || true)
-    if [[ -n "$line" ]] && echo "$line" | grep -qE '=.+'; then
-      log_warning "$envfile: $pattern has a value set"
-      PHASE4_ISSUES=$((PHASE4_ISSUES + 1))
-    fi
-  done
-done < <(find "$TARGET_DIR" -maxdepth 3 -name ".env*" -type f "${FIND_EXCLUDES[@]}" 2>/dev/null)
-
-# Check next.config.* for secrets in env / publicRuntimeConfig
-for cfg in "${NEXT_CONFIGS[@]}"; do
-  if [[ -f "$cfg" ]]; then
+  while IFS= read -r line; do
     for pattern in "${SECRET_PATTERNS[@]}"; do
-      if grep -q "$pattern" "$cfg" 2>/dev/null; then
-        log_warning "$(basename "$cfg"): $pattern found — check if secret is exposed to client"
+      if [[ "$line" == *"$pattern"* ]] && echo "$line" | grep -qE '=.+'; then
+        log_warning "$envfile: $pattern has a value set"
         PHASE4_ISSUES=$((PHASE4_ISSUES + 1))
+        break
       fi
     done
+  done < <(grep -E "$SECRET_COMBINED" "$envfile" 2>/dev/null || true)
+done < <(find "$TARGET_DIR" -maxdepth 3 -name ".env*" -type f "${FIND_EXCLUDES[@]}" 2>/dev/null)
+
+# Check next.config.* for secrets in env / publicRuntimeConfig (single grep per file)
+for cfg in "${NEXT_CONFIGS[@]}"; do
+  if [[ -f "$cfg" ]]; then
+    while IFS= read -r line; do
+      for pattern in "${SECRET_PATTERNS[@]}"; do
+        if [[ "$line" == *"$pattern"* ]]; then
+          log_warning "$(basename "$cfg"): $pattern found — check if secret is exposed to client"
+          PHASE4_ISSUES=$((PHASE4_ISSUES + 1))
+          break
+        fi
+      done
+    done < <(grep -E "$SECRET_COMBINED" "$cfg" 2>/dev/null || true)
     if grep -q 'publicRuntimeConfig' "$cfg" 2>/dev/null; then
       log_warning "$(basename "$cfg"): publicRuntimeConfig detected — secrets here are exposed to browser"
       PHASE4_ISSUES=$((PHASE4_ISSUES + 1))
@@ -315,22 +340,17 @@ for cfg in "${NEXT_CONFIGS[@]}"; do
   fi
 done
 
-# Check source code for hardcoded secret prefixes (single-pass scan)
+# Check source code for hardcoded secret prefixes (find files, then identify pattern)
 combined_prefix=$(IFS='|'; echo "${HARDCODED_PREFIXES[*]}")
 while IFS= read -r match_file; do
-  for prefix_pattern in "${HARDCODED_PREFIXES[@]}"; do
-    match_line=$(grep -m1 -E "$prefix_pattern" "$match_file" 2>/dev/null | head -c 120 || true)
-    if [[ -n "$match_line" ]]; then
-      log_critical "Possible hardcoded secret in $match_file"
-      echo -e "  ${RED}  -> Pattern '$prefix_pattern' match: ${match_line:0:80}${NC}"
-      PHASE4_ISSUES=$((PHASE4_ISSUES + 1))
-      break
-    fi
-  done
+  match_line=$(grep -m1 -oE "$combined_prefix[A-Za-z0-9_-]{4,}" "$match_file" 2>/dev/null | head -c 80 || true)
+  if [[ -n "$match_line" ]]; then
+    log_critical "Possible hardcoded secret in $match_file"
+    echo -e "  ${RED}  -> Match: ${match_line}${NC}"
+    PHASE4_ISSUES=$((PHASE4_ISSUES + 1))
+  fi
 done < <(grep -rlE "$combined_prefix" "$TARGET_DIR" \
-  --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" --include="*.mjs" \
-  --exclude-dir=node_modules --exclude-dir=_deleted --exclude-dir=.git \
-  --exclude="scan.sh" \
+  "${SOURCE_INCLUDES[@]}" "${GREP_EXCLUDES[@]}" \
   2>/dev/null || true)
 
 # Reminder about __NEXT_DATA__
@@ -391,15 +411,18 @@ echo -e "${CYAN}[Phase 6] Cloud configuration check${NC}"
 
 PHASE6_ISSUES=0
 
-# Docker Compose: hardcoded secrets in environment: blocks
+# Docker Compose: hardcoded secrets in environment: blocks (single grep per file)
 for compose_file in docker-compose.yml docker-compose.yaml docker-compose.prod.yml docker-compose.production.yml; do
   if [[ -f "$TARGET_DIR/$compose_file" ]]; then
-    for pattern in "${SECRET_PATTERNS[@]}"; do
-      if grep -qE "${pattern}[[:space:]]*:[[:space:]]*[^$\"\'][^{]" "$TARGET_DIR/$compose_file" 2>/dev/null; then
-        log_warning "$compose_file: $pattern appears to have a hardcoded value (not using \${VAR} syntax)"
-        PHASE6_ISSUES=$((PHASE6_ISSUES + 1))
-      fi
-    done
+    while IFS= read -r line; do
+      for pattern in "${SECRET_PATTERNS[@]}"; do
+        if [[ "$line" == *"$pattern"* ]]; then
+          log_warning "$compose_file: $pattern appears to have a hardcoded value (not using \${VAR} syntax)"
+          PHASE6_ISSUES=$((PHASE6_ISSUES + 1))
+          break
+        fi
+      done
+    done < <(grep -E "($SECRET_COMBINED)[[:space:]]*:[[:space:]]*[^\$\"'][^{]" "$TARGET_DIR/$compose_file" 2>/dev/null || true)
   fi
 done
 
@@ -449,22 +472,22 @@ declare -a C2_IPS=(
   "144.172.117.112"
 )
 
-# Check source files for C2 IP references
+# Check source files for C2 IP references (single grep per file)
 c2_pattern=$(printf '%s\n' "${C2_IPS[@]}" | sed 's/\./\\./g' | paste -sd'|' -)
 while IFS= read -r match_file; do
-  for ip in "${C2_IPS[@]}"; do
-    if grep -q "$ip" "$match_file" 2>/dev/null; then
-      log_critical "C2 IP address '$ip' found in source: $match_file"
-      match_line=$(grep -m1 "$ip" "$match_file" 2>/dev/null | head -c 120 || true)
-      echo -e "  ${RED}  -> $match_line${NC}"
-      PHASE7_ISSUES=$((PHASE7_ISSUES + 1))
-    fi
-  done
+  while IFS= read -r match_line; do
+    for ip in "${C2_IPS[@]}"; do
+      if [[ "$match_line" == *"$ip"* ]]; then
+        log_critical "C2 IP address '$ip' found in source: $match_file"
+        echo -e "  ${RED}  -> ${match_line:0:120}${NC}"
+        PHASE7_ISSUES=$((PHASE7_ISSUES + 1))
+        break
+      fi
+    done
+  done < <(grep -E "$c2_pattern" "$match_file" 2>/dev/null || true)
 done < <(grep -rlE "$c2_pattern" "$TARGET_DIR" \
-  --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" \
-  --include="*.mjs" --include="*.json" --include="*.env" \
-  --exclude-dir=node_modules --exclude-dir=.git \
-  --exclude="scan.sh" \
+  "${SOURCE_INCLUDES[@]}" --include="*.json" --include="*.env" \
+  "${GREP_EXCLUDES[@]}" \
   2>/dev/null || true)
 
 # /tmp/ random dot-prefix processes (Linux only)
