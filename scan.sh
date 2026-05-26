@@ -45,8 +45,8 @@ is_nextjs_vulnerable() {
   local ver="$1"
   local major minor patch
 
-  # Parse x.y.z
-  IFS='.' read -r major minor patch <<< "$(echo "$ver" | sed 's/-[^.]*$//')" || true
+  # Parse x.y.z (strip any pre-release/build suffix first, e.g. 15.1.0-canary.5 -> 15.1.0)
+  IFS='.' read -r major minor patch <<< "$(echo "$ver" | sed 's/-.*$//')" || true
 
   # Must be numeric
   [[ "${major:-}" =~ ^[0-9]+$ ]] || return 1
@@ -77,6 +77,7 @@ is_nextjs_vulnerable() {
 # Returns 0 (true) if React version is in vulnerable list
 is_react_vulnerable() {
   local ver="$1"
+  ver="${ver%%-*}"  # strip pre-release suffix (e.g. 19.1.0-rc.1 -> 19.1.0); applies to all call sites incl. lockfiles
   local -a REACT_VULNERABLE=("19.0.0" "19.1.0" "19.1.1" "19.2.0")
   for v in "${REACT_VULNERABLE[@]}"; do
     [[ "$ver" == "$v" ]] && return 0
@@ -343,7 +344,10 @@ done
 # Check source code for hardcoded secret prefixes (find files, then identify pattern)
 combined_prefix=$(IFS='|'; echo "${HARDCODED_PREFIXES[*]}")
 while IFS= read -r match_file; do
-  match_line=$(grep -m1 -oE "$combined_prefix[A-Za-z0-9_-]{4,}" "$match_file" 2>/dev/null | head -c 80 || true)
+  # Exclude leading-comment lines (//, /*, *, #) to reduce false positives from example/snippet comments.
+  # Real hardcoded secrets in .env or code body are still detected; only top-of-line comments are skipped.
+  match_line=$(grep -vE '^[[:space:]]*(//|/\*|\*|#)' "$match_file" 2>/dev/null \
+    | grep -m1 -oE "$combined_prefix[A-Za-z0-9_-]{4,}" 2>/dev/null | head -c 80 || true)
   if [[ -n "$match_line" ]]; then
     log_critical "Possible hardcoded secret in $match_file"
     echo -e "  ${RED}  -> Match: ${match_line}${NC}"

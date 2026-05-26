@@ -1,0 +1,13 @@
+# Secrets — never commit real env files (examples/samples are allowed)
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Dependencies
+node_modules/
+
+# OS / editor artifacts
+.DS_Store
+Thumbs.db
+*.swp

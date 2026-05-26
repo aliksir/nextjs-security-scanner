@@ -2,6 +2,8 @@
 
 Next.jsプロジェクトの CVE-2025-55182（React2Shell）脆弱性とクレデンシャル露出を検出するBashスクリプト。依存ゼロ。
 
+**[English README here](README.md)**
+
 ## CVE-2025-55182: React2Shell
 
 CVSS: **10.0 (CRITICAL)** | CWE-502: 信頼されていないデータのデシリアライゼーション | SNORT SID: 65554
