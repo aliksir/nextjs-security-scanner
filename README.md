@@ -1,8 +1,8 @@
+> 日本語版は [README.ja.md](README.ja.md) を参照してください。
+
 # nextjs-security-scanner
 
 Bash script to detect CVE-2025-55182 (React2Shell) and credential exposure in Next.js projects. Zero dependencies.
-
-**[日本語版 README はこちら](README_ja.md)**
 
 ## CVE-2025-55182: React2Shell
 
